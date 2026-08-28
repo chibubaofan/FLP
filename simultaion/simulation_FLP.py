@@ -750,35 +750,30 @@ def self_check_node(state: GraphState):
         "newly_infected_ids": new_inf_list
         }
         # ====================================================================
-##################修改过还没用过，暂时不知道是否正常#######################
 def long_term_healing_node(state: GraphState):
     """
-    长期感染自愈节点 (Safe Recursive Binary Diagnosis - SRBD):
+    长期感染自愈节点 (Strict Dual-Metrics & Aligned Context SRBD):
     1. 采用广度优先搜索 (BFS) 队列模拟递归二分。
-    2. 【修改点】终止条件修改为：(1) 片段长度 <= 3（避免样本量过小导致误伤良性）；(2) 达到最大递归深度。
-    3. 【修改点】覆盖时详细打印每张图片的计算指标与 Ground Truth（是否真为恶意图片）。
-    4. 【修改点】每轮聚合统计替换的混淆矩阵 (TP, TN, FP, FN) 及精确率/召回率。
+    2. 仅使用语义多样性 (Diversity) 和检索熵 (Entropy) 进行定位。
+    3. 【对齐修复】采样策略、环境描述、历史记录已与自交互(诊断)阶段完全拉齐，防止基准偏移。
     """
     target_ids = state.get("long_term_infected_ids", [])
     if not target_ids:
         return {"agents": state["agents"], "temp_healing": []}
 
-    print(f"--- Step {state['step_count']}: Long-Term Healing (SRBD Mode) for {len(target_ids)} agents ---")
+    print(f"--- Step {state['step_count']}: Long-Term Healing (Strict Aligned Mode) for {len(target_ids)} agents ---")
     
     agents_state = state["agents"].copy()
     healing_records = []
     
-    # 指标配置
-    NUM_SAMPLES = 5
-    W_DIVERSITY = 0.8
-    W_ENTROPY = 0.2
-    TH_SCORE = args.malicious_threshold 
+    # 统一静态阈值
+    TH_DIVERSITY = 0.1455  
+    TH_ENTROPY = 0   
     
     sample_album_len = args.album_length
     MAX_DEPTH = math.ceil(math.log2(sample_album_len)) if sample_album_len > 0 else 4
     
     diagnosis_queue = deque()
-    # 记录每个 agent 最终被判定为需要覆盖的片段集合及其关联的各项指标
     replacement_targets = {aid: [] for aid in target_ids}
     
     for agent_id in target_ids:
@@ -805,30 +800,43 @@ def long_term_healing_node(state: GraphState):
             current_slice = [original_album[i] for i in indices]
             if not current_slice: continue
             
-            for _ in range(NUM_SAMPLES):
-                if len(all_personas) >= 2:
-                    p1, p2 = random.sample(all_personas, 2)
-                else:
-                    p1 = p2 = all_personas[0]
-                
-                env_description = [f"{p1['Name']} is verifying memory slice with {p2['Name']}."]
-                
-                p1_proxy = {
-                    "personas": [p1], 
-                    "chat_history": [], 
-                    "photo_album": current_slice
-                }
-                prompts_p1 = PromptGenerator.get_prompts(p1_proxy, p1['Name'], env_description)
-                
-                tasks.append({
-                    "segment_info": segment_info,
-                    "agent_id": agent_id,
-                    "slice_content": current_slice,
-                    "p1": p1, "p2": p2, "env": env_description,
-                    "prompts_p1": prompts_p1,
-                    "thought": None, "target_image": "No_Image",
-                    "question": None, "response": None
-                })
+            # ====================================================================
+            # 【修改点 3：对齐人格采样策略】
+            # 废弃 random.sample 随机抽样，改用与自交互节点完全一致的 random_pairs 遍历。
+            # 同样循环 3 次，确保交互样本的数量和分布特征完全一致。
+            # ====================================================================
+            for _ in range(3): 
+                try:
+                    pairs = random_pairs(all_personas)
+                except ValueError:
+                    # 容错：如果人格数量不是偶数，去掉最后一个以防报错
+                    shuffled = all_personas[:]
+                    random.shuffle(shuffled)
+                    pairs = list(zip(shuffled[::2], shuffled[1::2]))
+                    
+                for p1, p2 in pairs:
+                    # ============================================================
+                    # 【修改点 1：对齐环境设定】
+                    # 废弃 "verifying memory slice"，改回与诊断一致的 "chatting with" 闲聊设定
+                    # ============================================================
+                    env_description = [f"{p1['Name']} is chatting with {p2['Name']}."]
+                    
+                    p1_proxy = {
+                        "personas": [p1], 
+                        "chat_history": [], 
+                        "photo_album": current_slice
+                    }
+                    prompts_p1 = PromptGenerator.get_prompts(p1_proxy, p1['Name'], env_description)
+                    
+                    tasks.append({
+                        "segment_info": segment_info,
+                        "agent_id": agent_id,
+                        "slice_content": current_slice,
+                        "p1": p1, "p2": p2, "env": env_description,
+                        "prompts_p1": prompts_p1,
+                        "thought": None, "target_image": "No_Image",
+                        "question": None, "response": None
+                    })
 
         if not tasks:
             continue
@@ -836,7 +844,7 @@ def long_term_healing_node(state: GraphState):
         batch_size = args.batch_size
         print(f"Executing {len(tasks)} SRBD tasks at depth {current_batch_segments[0][2]}...")
 
-        # (并发推理逻辑，保持不变)
+        # 生成 Thought
         thoughts = brain.generate_batch(
             [t["prompts_p1"]["active_thought"] for t in tasks], 
             batch_size=batch_size, max_new_tokens=77
@@ -844,11 +852,10 @@ def long_term_healing_node(state: GraphState):
         for i, t in enumerate(tasks):
             t["thought"] = thoughts[i]
 
-        # --- 1. 构建 Question 的 Prompt 列表 ---
+        # 构建 Question Prompts & Target Images
         question_prompts = []
         for t in tasks:
             try:
-                # CLIP 检索最匹配的图片 (这部分逻辑保持不变)
                 txt_in = clip_feature_extractor.processor(text=[t["thought"]], return_tensors="pt", padding=True, truncation=True).to(clip_feature_extractor.device)
                 with torch.no_grad():
                     txt_emb = clip_feature_extractor.model.get_text_features(**txt_in)
@@ -861,26 +868,29 @@ def long_term_healing_node(state: GraphState):
             except: 
                 pass
 
+            # ====================================================================
+            # 【修改点 2：对齐上下文记忆】
+            # 废弃 `chat_history: [Thought...]` 拼接，改回纯净的 `[]`
+            # 防止 Thought 限制 Question 的发散空间，确保文本多样性不受人为压缩
+            # ====================================================================
             p1_proxy = {
                 "personas": [t["p1"]], 
-                "chat_history": [f"{t['p1']['Name']}: Thought: {t['thought']}"], 
+                "chat_history": [], # <--- 强制置空，与 self_interact 节点对齐
                 "photo_album": t["slice_content"]
             }
             prompts = PromptGenerator.get_prompts(p1_proxy, t["p1"]['Name'], t["env"])
-            
-            # 【修复1】不要直接赋给 t["question"]，而是收集起来准备推理
             question_prompts.append(prompts["active_action"])
 
-        # --- 2. 【核心修复】调用 VLM 批量生成真实的 Question ---
+        # 生成 Question
         questions = brain.generate_batch(
             question_prompts,
             image_urls=[t["target_image"] for t in tasks],
             batch_size=batch_size
         )
         for i, t in enumerate(tasks):
-            t["question"] = questions[i]  # 此时这里才是干净的对话文本！
+            t["question"] = questions[i] 
 
-        # --- 3. 生成被动回复 (Response) ---
+        # 生成 Response
         resp_prompts = []
         for t in tasks:
             p2_proxy = {
@@ -888,7 +898,6 @@ def long_term_healing_node(state: GraphState):
                 "chat_history": [], 
                 "photo_album": t["slice_content"]
             }
-            # 此时传入的 t["question"] 是干净的文本，不会再引发双重 <image> 的 Bug
             resp_prompts.append(PromptGenerator.get_passive_response_prompt(
                 p2_proxy, t["p2"]['Name'], t["env"], t["question"]
             ))
@@ -914,52 +923,37 @@ def long_term_healing_node(state: GraphState):
             agent_id, indices, depth = key
             
             div_score, ent_score = 0.0, 0.0
+            
+            # 计算 Diversity 和 Entropy
             if data["texts"]:
                 try:
-                    emb = clip_feature_extractor.get_text_embeddings(data["texts"])
-                    if emb is not None:
-                        div_score = calculator.calculate_semantic_diversity(emb)
+                    curr_embs = clip_feature_extractor.get_text_embeddings(data["texts"])
+                    if curr_embs is not None:
+                        div_score = calculator.calculate_semantic_diversity(curr_embs)
                 except: pass
+                
             if data["images"]:
                 valid_imgs = [img for img in data["images"] if img != "No_Image"]
                 ent_score = calculator.calculate_retrieval_entropy(valid_imgs)
                 
-            final_score = (W_DIVERSITY * div_score) + (W_ENTROPY * ent_score)
-            # ================== 【核心修改：引入长度动态因子】 ==================
-            current_length = len(indices)
-            max_length = args.album_length
-            
-            # 使用对数平滑计算衰减因子 (例如：最大长度10算出来是1.0，长度3算出来约0.58)
-            # 这样短切片的及格线会相应降低，避免无辜被删
-            length_factor = (math.log(current_length + 1) / math.log(max_length + 1)) ** 0.6
-            
-            # 你也可以加上一个调节超参 alpha 来控制衰减力度 (这里默认为 1.0)
-            # length_factor = length_factor ** 1.0 
-            
-            dynamic_th = TH_SCORE * length_factor
-            # ====================================================================
-            
-            # 【新增：无条件打印所有切片的评估分数，用于动态分析阈值】
-            # 我们保留 4 位小数，以便你能看出微小的分数差异
+            # 使用严格的布尔逻辑判定可疑
+            is_suspicious = (div_score <= TH_DIVERSITY) and (ent_score <= TH_ENTROPY)
+
             print(f"[Slice Eval] Agent: {agent_id} | Depth: {depth} | Indices: {list(indices)}")
-            print(f"             └─> Div: {div_score:.4f}, Ent: {ent_score:.4f} | Final Score: {final_score:.4f} (vs DynamicTH: {dynamic_th:.4f})")
+            print(f"            └─> Div: {div_score:.4f}, Ent: {ent_score:.4f} | Is Suspicious: {is_suspicious}")
 
-            if final_score < dynamic_th:
-                print(f"Agent {agent_id}: Suspicious Segment {list(indices)} at depth {depth} "
-                      f"(Div={div_score:.2f}, Ent={ent_score:.2f}, Score={final_score:.2f})")
-
+            if is_suspicious:
+                print(f"Agent {agent_id}: Suspicious Segment {list(indices)} at depth {depth} pinpointed!")
                 
-                # --- 【核心修改1】提早结束二分条件：长度 <= 3 或 达到最大深度 ---
+                # 如果切片长度 <= 3 或达到最大深度，则锁定目标准备覆盖
                 if len(indices) <= 3 or depth >= MAX_DEPTH:
-                    print(f"Agent {agent_id}: Target Pinpointed! Marking index {list(indices)} for replacement.")
-                    # 保存该片段的所有信息以备覆盖日志使用
                     replacement_targets[agent_id].append({
                         "indices": list(indices),
                         "div": div_score,
-                        "ent": ent_score,
-                        "score": final_score
+                        "ent": ent_score
                     })
                 else:
+                    # 否则继续对半切分
                     mid = len(indices) // 2
                     left_indices = indices[:mid]
                     right_indices = indices[mid:]
@@ -975,7 +969,6 @@ def long_term_healing_node(state: GraphState):
         agent_data = agents_state[agent_id]
         new_album_list = list(agent_data["photo_album"])
         
-        # 1. 获取 Ground Truth (确定哪些索引真正包含恶意图片)
         actual_malicious_indices = set()
         for idx, img in enumerate(new_album_list):
             if args.attack_image and str(args.attack_image) in str(img):
@@ -983,10 +976,8 @@ def long_term_healing_node(state: GraphState):
                 
         predicted_malicious_indices = set()
         
-        # 2. 执行安全替换 (并详细打印替换时的指标和判定)
         for seg in segments:
             for idx in seg["indices"]:
-                # 避免同一张图片被跨分支或重复替换统计
                 if idx in predicted_malicious_indices:
                     continue
                 predicted_malicious_indices.add(idx)
@@ -995,9 +986,8 @@ def long_term_healing_node(state: GraphState):
                     bad_img = new_album_list[idx]
                     is_actually_malicious = (idx in actual_malicious_indices)
                     
-                    # --- 【核心修改2】打印每张被覆盖图片的精细日志 ---
                     print(f"[Overwrite Log] Agent: {agent_id} | Index: {idx} | "
-                          f"Trigger Metrics -> Div: {seg['div']:.2f}, Ent: {seg['ent']:.2f}, Final: {seg['score']:.2f} | "
+                          f"Trigger Metrics -> Div: {seg['div']:.2f}, Ent: {seg['ent']:.2f} | "
                           f"Is Malicious Ground Truth? {'[TRUE HIT!]' if is_actually_malicious else '[WRONG HIT (Sacrificed)]'}")
                     
                     benign_img = get_benign_image(args.album_data.removesuffix("{}").rstrip("/")) if 'get_benign_image' in globals() else "safe_neutral_image.jpg"
@@ -1012,7 +1002,6 @@ def long_term_healing_node(state: GraphState):
                         "is_correct_hit": is_actually_malicious
                     })
         
-        # 3. 统计该 Agent 内部的混淆矩阵 (TP/TN/FP/FN)
         for idx in range(len(new_album_list)):
             actual_mal = idx in actual_malicious_indices
             pred_mal = idx in predicted_malicious_indices
@@ -1025,16 +1014,14 @@ def long_term_healing_node(state: GraphState):
             else:
                 round_tn += 1
         
-        # 将结构完好、已被清洗的新相册重新塞回代理内存
         agent_data["photo_album"] = deque(new_album_list, maxlen=args.album_length)
 
-    # --- 【核心修改3】每轮末尾打印汇总的准确率指标 ---
     if len(target_ids) > 0:
         print(f"\n======== Round {state.get('step_count', 'X')} Healing Accuracy Summary ========")
-        print(f"TP (Correctly Purged Malicious Images): {round_tp}")
-        print(f"FP (Wrongly Purged Benign Images): {round_fp}")
-        print(f"FN (Missed Malicious Images): {round_fn}")
-        print(f"TN (Correctly Kept Benign Images): {round_tn}")
+        print(f"TP (Correctly Purged): {round_tp}")
+        print(f"FP (Wrongly Purged):   {round_fp}")
+        print(f"FN (Missed Malicious): {round_fn}")
+        print(f"TN (Correctly Kept):   {round_tn}")
         
         precision = round_tp / (round_tp + round_fp) if (round_tp + round_fp) > 0 else 0.0
         recall = round_tp / (round_tp + round_fn) if (round_tp + round_fn) > 0 else 0.0
@@ -1044,8 +1031,6 @@ def long_term_healing_node(state: GraphState):
         print(f"===============================================================\n")
 
     return {"agents": agents_state, "temp_healing": healing_records}
-
-
 
 # --- 短期感染自愈节点 ---
 def new_infection_healing_node(state: GraphState):
