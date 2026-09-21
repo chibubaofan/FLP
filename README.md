@@ -78,22 +78,6 @@ bash simultaion_FLP.sh
 
 ---
 
-## Citation
-
-If you find this project helpful for your research, please cite:
-
-```bibtex
-@misc{ma2026catchinginfectionspreadsforesightguided,
-      title={Catching the Infection Before It Spreads: Foresight-Guided Defense in Multi-Agent Systems}, 
-      author={Yue Ma and Ziyuan Yang and Yi Zhang},
-      year={2026},
-      eprint={2605.01758},
-      archivePrefix={arXiv},
-      primaryClass={cs.AI},
-      url={https://arxiv.org/abs/2605.01758}, 
-}
-```
-
 ## Acknowledgments
 
 Thanks to the open-source project AgentSmith: [sail-sg/Agent-Smith: [ICML 2024] Agent Smith: A Single Image Can Jailbreak One Million Multimodal LLM Agents Exponentially Fast](https://github.com/sail-sg/Agent-Smith)

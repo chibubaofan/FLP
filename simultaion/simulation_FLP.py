@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("--max_records", type=int, default=3, help="")
     parser.add_argument("--album_length", type=int, default=10, help="")    
     parser.add_argument("--max_new_tokens", type=int, default=128, help="")
-    # parser.add_argument("--api_key", type=str, default="sk-rgtsolrngejoaotksmgzafywrqcakbfoiqgndxecrjoarxoc", help="API key for the VLM model")
+
     # parameters related to train and evaluation
     parser.add_argument("--agent_data", type=str, default="./data/million_villagers_1024_test.json", help="")
     parser.add_argument("--album_data", type=str, default="./data/album_pool/{}", help="")
